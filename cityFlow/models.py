@@ -1,9 +1,15 @@
+# cityFlow/models.py
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+
+# ══════════════════════════════════════════════
+# 1. AUTENTICACIÓN
+# ══════════════════════════════════════════════
 
 class UserManager(BaseUserManager):
-
-
     def create_user(self, email, name, password=None, **extra_fields):
         if not email:
             raise ValueError("El email es obligatorio")
@@ -17,28 +23,19 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
         extra_fields.setdefault("role", "admin")
-
-        if extra_fields.get("is_staff") is not True:
-            raise ValueError("El superusuario debe tener is_staff=True")
-        if extra_fields.get("is_superuser") is not True:
-            raise ValueError("El superusuario debe tener is_superuser=True")
-
         return self.create_user(email, name, password, **extra_fields)
 
 
 class User(AbstractBaseUser, PermissionsMixin):
-
     ROLE_CHOICES = [
         ("admin", "Administrador"),
         ("analyst", "Analista"),
         ("viewer", "Visualizador"),
     ]
 
-    name = models.CharField(max_length=120)
     email = models.EmailField(max_length=255, unique=True)
-    password = models.CharField(max_length=255, db_column="password_hash")
+    name = models.CharField(max_length=120)
     role = models.CharField(max_length=50, choices=ROLE_CHOICES, default="viewer")
-
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -50,63 +47,247 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     class Meta:
         db_table = "users"
-        verbose_name = "Usuario"
-        verbose_name_plural = "Usuarios"
 
     def __str__(self):
         return f"{self.name} <{self.email}>"
 
 
+class UserProfile(models.Model):
+    """1:1 con User. Se autocrea vía signal."""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
+    phone_number = models.CharField(max_length=20, blank=True)
+    department = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "user_profiles"
+
+    def __str__(self):
+        return f"Profile de {self.user.email}"
+
+
+@receiver(post_save, sender=User)
+def create_user_profile(sender, instance, created, **kwargs):
+    if created:
+        UserProfile.objects.create(user=instance)
+
+
+# ══════════════════════════════════════════════
+# 2. MAESTRO: DISTRICT
+# ══════════════════════════════════════════════
+
+class District(models.Model):
+    """Distrito maestro. Coordenadas para Folium."""
+    code = models.CharField(max_length=10, unique=True, help_text="Matches GeoJSON")
+    name = models.CharField(max_length=100)
+    area_km2 = models.DecimalField(max_digits=6, decimal_places=2)
+    population = models.IntegerField()
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, help_text="Centroid for Folium")
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, help_text="Centroid for Folium")
+
+    class Meta:
+        db_table = "districts"
+        ordering = ["name"]
+
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+
+# ══════════════════════════════════════════════
+# 3. METEOROLOGÍA
+# ══════════════════════════════════════════════
+
+class WeatherRecord(models.Model):
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="weather_records", null=True)
+    date = models.DateField(db_index=True)
+    temp_avg_celsius = models.DecimalField(max_digits=5, decimal_places=2)
+    temp_max_celsius = models.DecimalField(max_digits=5, decimal_places=2)
+    rainfall_mm = models.DecimalField(max_digits=6, decimal_places=2)
+    humidity_percent = models.DecimalField(max_digits=5, decimal_places=2)
+
+    class Meta:
+        db_table = "weather_records"
+        unique_together = [("district", "date")]
+        ordering = ["-date"]
+
+    def __str__(self):
+        return f"{self.district} - {self.date}"
+
+
+# ══════════════════════════════════════════════
+# 4. CONSUMO DE AGUA + PREDICCIÓN
+# ══════════════════════════════════════════════
+
 class WaterConsumption(models.Model):
-    district_code = models.CharField(max_length=10)
-    district_name = models.CharField(max_length=100)
-    consumption_m3 = models.DecimalField(max_digits=10, decimal_places=2)
-    period_date = models.DateField()
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="water_consumptions")
+    consumption_m3 = models.DecimalField(max_digits=12, decimal_places=2)
+    domestic_consumption_m3 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    commercial_consumption_m3 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    period_date = models.DateField(db_index=True)
 
     class Meta:
         db_table = "water_consumption"
-        verbose_name = "Consumo de agua"
-        verbose_name_plural = "Consumos de agua"
+        unique_together = [("district", "period_date")]
         ordering = ["-period_date"]
-        indexes = [models.Index(fields=["district_code", "period_date"])]
 
     def __str__(self):
-        return f"{self.district_name} - {self.period_date} ({self.consumption_m3} m³)"
+        return f"{self.district.code} - {self.period_date}: {self.consumption_m3} m³"
 
 
+class WaterPrediction(models.Model):
+    STATUS_CHOICES = [
+        ("pending_review", "Pendiente de revisión"),
+        ("verified_leak", "Fuga verificada"),
+        ("false_positive", "Falso positivo"),
+    ]
+
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="water_predictions")
+    target_date = models.DateField(db_index=True)
+    expected_consumption_m3 = models.DecimalField(max_digits=12, decimal_places=2)
+    observed_consumption_m3 = models.DecimalField(max_digits=12, decimal_places=2)
+    deviation_pct = models.FloatField(help_text="% diferencia observado vs esperado")
+    anomaly_score = models.FloatField(help_text="0.0 a 1.0")
+    is_anomaly = models.BooleanField(default=False)
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default="pending_review")
+    model_version = models.CharField(max_length=50)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "water_predictions"
+        unique_together = [("district", "target_date")]
+        ordering = ["-target_date"]
+
+    def __str__(self):
+        return f"{self.district.code} - {self.target_date} (anomaly={self.is_anomaly})"
+
+
+# ══════════════════════════════════════════════
+# 5. CALIDAD DEL AIRE + PREDICCIÓN
+# ══════════════════════════════════════════════
 
 class AirQuality(models.Model):
-    district_code = models.CharField(max_length=10)
-    district_name = models.CharField(max_length=100)
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="air_qualities")
     no2_level = models.DecimalField(max_digits=6, decimal_places=2, help_text="µg/m³")
     pm10_level = models.DecimalField(max_digits=6, decimal_places=2, help_text="µg/m³")
-    period_date = models.DateField()
+    period_date = models.DateField(db_index=True)
 
     class Meta:
         db_table = "air_quality"
-        verbose_name = "Calidad del aire"
-        verbose_name_plural = "Calidad del aire"
+        unique_together = [("district", "period_date")]
         ordering = ["-period_date"]
-        indexes = [models.Index(fields=["district_code", "period_date"])]
 
     def __str__(self):
-        return f"{self.district_name} - {self.period_date} (NO₂: {self.no2_level}, PM10: {self.pm10_level})"
+        return f"{self.district.code} - {self.period_date}"
 
 
+class AirPrediction(models.Model):
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="air_predictions")
+    forecast_at = models.DateTimeField(db_index=True)
+    no2_predicted = models.DecimalField(max_digits=6, decimal_places=2)
+    pm10_predicted = models.DecimalField(max_digits=6, decimal_places=2)
+    model_version = models.CharField(max_length=50)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "air_predictions"
+        ordering = ["-forecast_at"]
+
+    def __str__(self):
+        return f"{self.district.code} @ {self.forecast_at}"
+
+
+# ══════════════════════════════════════════════
+# 6. PRESIÓN TURÍSTICA
+# ══════════════════════════════════════════════
 
 class TourismPressure(models.Model):
-    district_code = models.CharField(max_length=10)
-    district_name = models.CharField(max_length=100)
-    hut_count = models.IntegerField(help_text="Número de viviendas de uso turístico (HUT)")
-    avg_noise_db = models.DecimalField(max_digits=5, decimal_places=2, help_text="Nivel acústico en dB")
-    period_date = models.DateField()
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="tourism_pressures")
+    hut_count = models.IntegerField(help_text="Viviendas de uso turístico (HUT)")
+    avg_noise_db = models.DecimalField(max_digits=5, decimal_places=2, help_text="dB")
+    period_date = models.DateField(db_index=True)
 
     class Meta:
         db_table = "tourism_pressure"
-        verbose_name = "Presión turística"
-        verbose_name_plural = "Presión turística"
+        unique_together = [("district", "period_date")]
         ordering = ["-period_date"]
-        indexes = [models.Index(fields=["district_code", "period_date"])]
 
     def __str__(self):
-        return f"{self.district_name} - {self.period_date} ({self.hut_count} HUT, {self.avg_noise_db} dB)"
+        return f"{self.district.code} - {self.period_date}"
+
+
+# ══════════════════════════════════════════════
+# 7. INCIDENCIAS + TAGS (N:M)
+# ══════════════════════════════════════════════
+
+class Tag(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+    slug = models.SlugField(max_length=50, unique=True)
+
+    class Meta:
+        db_table = "tags"
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class IncidentReport(models.Model):
+    STATUS_CHOICES = [
+        ("open", "Abierta"),
+        ("in_progress", "En progreso"),
+        ("resolved", "Resuelta"),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="incidents")
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="incidents")
+    title = models.CharField(max_length=150)
+    description = models.TextField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="open")
+    tags = models.ManyToManyField(Tag, related_name="incidents", blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "incident_reports"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"#{self.id} {self.title} ({self.status})"
+
+
+# ══════════════════════════════════════════════
+# 8. ALERTAS (para WebSockets)
+# ══════════════════════════════════════════════
+
+class Alert(models.Model):
+    ALERT_TYPE_CHOICES = [
+        ("water_anomaly", "Anomalía de agua"),
+        ("air_quality", "Calidad del aire"),
+        ("incident", "Incidencia"),
+    ]
+    SEVERITY_CHOICES = [
+        ("critical", "Crítica"),
+        ("warning", "Advertencia"),
+        ("info", "Informativa"),
+    ]
+    STATUS_CHOICES = [
+        ("unread", "No leída"),
+        ("acknowledged", "Reconocida"),
+        ("resolved", "Resuelta"),
+    ]
+
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="alerts")
+    alert_type = models.CharField(max_length=50, choices=ALERT_TYPE_CHOICES)
+    severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES)
+    title = models.CharField(max_length=150)
+    message = models.TextField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="unread")
+    related_object_id = models.IntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "alerts"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"[{self.severity}] {self.title}"
