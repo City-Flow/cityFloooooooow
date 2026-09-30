@@ -1,0 +1,7 @@
+.venv
+
+__init__.py
+
+db.slqite3
+
+__pycache__
