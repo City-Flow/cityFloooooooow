@@ -98,7 +98,7 @@ class District(models.Model):
 # ══════════════════════════════════════════════
 
 class WeatherRecord(models.Model):
-    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="weather_records", null=True)
+    district = models.ForeignKey(District, on_delete=models.SET_NULL, related_name="weather_records", null=True, blank=True)
     date = models.DateField(db_index=True)
     temp_avg_celsius = models.DecimalField(max_digits=5, decimal_places=2)
     temp_max_celsius = models.DecimalField(max_digits=5, decimal_places=2)
@@ -107,8 +107,10 @@ class WeatherRecord(models.Model):
 
     class Meta:
         db_table = "weather_records"
-        unique_together = [("district", "date")]
         ordering = ["-date"]
+        constraints = [
+            models.UniqueConstraint(fields=["district", "date"], name="unique_weather_district_date")
+        ]
 
     def __str__(self):
         return f"{self.district} - {self.date}"
@@ -119,7 +121,7 @@ class WeatherRecord(models.Model):
 # ══════════════════════════════════════════════
 
 class WaterConsumption(models.Model):
-    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="water_consumptions")
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="water_consumptions", null=True, blank=True)
     consumption_m3 = models.DecimalField(max_digits=12, decimal_places=2)
     domestic_consumption_m3 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     commercial_consumption_m3 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -127,8 +129,10 @@ class WaterConsumption(models.Model):
 
     class Meta:
         db_table = "water_consumption"
-        unique_together = [("district", "period_date")]
         ordering = ["-period_date"]
+        constraints = [
+            models.UniqueConstraint(fields=["district", "period_date"], name="unique_water_district_period")
+        ]
 
     def __str__(self):
         return f"{self.district.code} - {self.period_date}: {self.consumption_m3} m³"
@@ -141,7 +145,7 @@ class WaterPrediction(models.Model):
         ("false_positive", "Falso positivo"),
     ]
 
-    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="water_predictions")
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="water_predictions", null=True, blank=True)
     target_date = models.DateField(db_index=True)
     expected_consumption_m3 = models.DecimalField(max_digits=12, decimal_places=2)
     observed_consumption_m3 = models.DecimalField(max_digits=12, decimal_places=2)
@@ -154,8 +158,10 @@ class WaterPrediction(models.Model):
 
     class Meta:
         db_table = "water_predictions"
-        unique_together = [("district", "target_date")]
         ordering = ["-target_date"]
+        constraints = [
+            models.UniqueConstraint(fields=["district", "target_date"], name="unique_water_pred_district_date")
+        ]
 
     def __str__(self):
         return f"{self.district.code} - {self.target_date} (anomaly={self.is_anomaly})"
@@ -166,15 +172,17 @@ class WaterPrediction(models.Model):
 # ══════════════════════════════════════════════
 
 class AirQuality(models.Model):
-    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="air_qualities")
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name="air_qualities", null=True, blank=True)
     no2_level = models.DecimalField(max_digits=6, decimal_places=2, help_text="µg/m³")
     pm10_level = models.DecimalField(max_digits=6, decimal_places=2, help_text="µg/m³")
     period_date = models.DateField(db_index=True)
 
     class Meta:
         db_table = "air_quality"
-        unique_together = [("district", "period_date")]
         ordering = ["-period_date"]
+        constraints = [
+            models.UniqueConstraint(fields=["district", "period_date"], name="unique_air_district_period")
+        ]
 
     def __str__(self):
         return f"{self.district.code} - {self.period_date}"
@@ -208,8 +216,10 @@ class TourismPressure(models.Model):
 
     class Meta:
         db_table = "tourism_pressure"
-        unique_together = [("district", "period_date")]
         ordering = ["-period_date"]
+        constraints = [
+            models.UniqueConstraint(fields=["district", "period_date"], name="unique_tourism_district_period")
+        ]
 
     def __str__(self):
         return f"{self.district.code} - {self.period_date}"
@@ -288,6 +298,9 @@ class Alert(models.Model):
     class Meta:
         db_table = "alerts"
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["district", "alert_type", "severity", "title"], name="unique_alert")
+        ]
 
     def __str__(self):
         return f"[{self.severity}] {self.title}"
